@@ -47,6 +47,10 @@ EXPECTED_FILES = {
     "src/snapshot/deserializer.cc",
 }
 
+# Only this tag gets the stderr index diagnostic. Other tags keep the
+# shared modern patcher unchanged.
+REFERENCE_INDEX_DIAGNOSTIC_VERSION = "15.2.124.28"
+
 WINDOWS_TOOLCHAIN_ARGS_RE = re.compile(
     r"^(?P<indent>[ \t]+)args = \[script_path,"
     r"(?:[^\]\r\n]*\r?\n[ \t]+)*[^\]\r\n]*\][ \t]*$",
@@ -100,6 +104,32 @@ def write_list(path: str, items):
     with open(path, "w", encoding="utf-8") as f:
         for it in items:
             f.write(it + "\n")
+
+
+def reference_index_diagnostic_command(version: str) -> list[str] | None:
+    """Return the exact-tag diagnostic command, or None for every other tag."""
+    if version != REFERENCE_INDEX_DIAGNOSTIC_VERSION:
+        return None
+    script = Path("patches/modern/diagnose_reference_index.py").resolve()
+    if not script.is_file():
+        raise RuntimeError(f"Missing reference index diagnostic {script}")
+    return [sys.executable, str(script), "--root", "."]
+
+
+def copy_icu_data(build_output_dir: Path, target_dir: Path, version: str) -> bool:
+    """Copy icudtl.dat beside the staged d8 when the build produced it.
+
+    V8 15.2.124.28 defaults i18n on and mksnapshot reads icudtl.dat. A
+    diagnostic build of that tag is incomplete without the data file.
+    Older tags keep their previous success condition when ICU is absent.
+    """
+    icu = build_output_dir / "icudtl.dat"
+    if icu.is_file():
+        shutil.copy2(icu, target_dir / icu.name)
+        return True
+    if version == REFERENCE_INDEX_DIAGNOSTIC_VERSION:
+        raise RuntimeError(f"V8 {version} build did not produce {icu}")
+    return False
 
 
 def select_patch_implementation(version: str) -> tuple[str, str]:
@@ -978,6 +1008,21 @@ def main():
                 restore_version_worktrees()
                 continue
 
+            diagnostic = reference_index_diagnostic_command(ver)
+            if diagnostic is not None:
+                diagnostic_rc = subprocess.run(diagnostic, cwd="v8").returncode
+                if diagnostic_rc != 0:
+                    log(f"[PATCH] Reference index diagnostic failed for {ver}")
+                    failed.append(ver)
+                    collect_audit_records(
+                        artifacts_dir,
+                        ver,
+                        os_name,
+                        "Reference index diagnostic returned a non-zero exit code.",
+                    )
+                    restore_version_worktrees()
+                    continue
+
             configure_host_compatibility()
             linux_legacy_gn_args = configure_v8_52_linux_gn(ver)
             if in_tree_gyp:
@@ -1040,6 +1085,8 @@ def main():
             log(f"Copying {built_bin.name} and {built_snapshot.name} to {target_dir}")
             shutil.copy2(built_bin, target_dir / built_bin.name)
             shutil.copy2(built_snapshot, target_dir / built_snapshot.name)
+            if copy_icu_data(build_output_dir, target_dir, ver):
+                log(f"Copying icudtl.dat to {target_dir}")
             
             if smoke_output:
                 (target_dir / "runtime_smoke.txt").write_text(
