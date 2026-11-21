@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      windows_only:
+        description: "Build only windows-2022. Default false keeps Linux and Windows."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -39,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022]
+        os: ${{ fromJSON(inputs.windows_only && '["windows-2022"]' || '["ubuntu-22.04", "windows-2022"]') }}
     env:
       ASSIGNED_JSON: ${{ inputs.versions_json || format('["{0}"]', inputs.version) }}
       DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
